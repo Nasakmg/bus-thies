@@ -212,11 +212,19 @@ export default function CarteReseau({
   // Déplacement de la caméra
   useEffect(() => {
     if (!pret || !cible) return
-    carte.current.flyTo({
-      center: [cible.lng, cible.lat],
-      zoom: cible.zoom ?? 15.5,
-      duration: 900,
-    })
+    if (cible.bounds) {
+      carte.current.fitBounds(cible.bounds, {
+        padding: 40,
+        maxZoom: 15.5,
+        duration: 900,
+      })
+    } else {
+      carte.current.flyTo({
+        center: [cible.lng, cible.lat],
+        zoom: cible.zoom ?? 15.5,
+        duration: 900,
+      })
+    }
   }, [pret, cible])
 
   return <div ref={conteneur} style={{ position: 'absolute', inset: 0 }} />

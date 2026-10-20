@@ -31,3 +31,21 @@ export function arretsProches(arretsFC, lat, lng, { rayon = 1000, max = 6 } = {}
     ? { arrets: dansRayon, horsRayon: false }
     : { arrets: liste.slice(0, 3), horsRayon: true }
 }
+
+
+// Rectangle englobant d'une géométrie GeoJSON : [[ouest, sud], [est, nord]]
+export function boundsGeometrie(geom) {
+  let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity
+  const parcourir = (c) => {
+    if (typeof c[0] === 'number') {
+      w = Math.min(w, c[0]); e = Math.max(e, c[0])
+      s = Math.min(s, c[1]); n = Math.max(n, c[1])
+    } else c.forEach(parcourir)
+  }
+  parcourir(geom.coordinates)
+  return [[w, s], [e, n]]
+}
+
+// Minuscules sans accents, pour une recherche tolérante
+export const normaliser = (t) =>
+  (t ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim()

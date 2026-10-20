@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import CarteReseau from './components/CarteReseau'
+import { supabase } from './lib/supabase'
 import { chargerReseau, construireDonnees, groupesLignes, couleurLigne } from './lib/reseau'
-import { arretsProches, distanceM } from './lib/geo'
+import { arretsProches, distanceM, boundsGeometrie, normaliser } from './lib/geo'
 
 function Pastille({ code }) {
   return (
@@ -14,16 +15,45 @@ function Pastille({ code }) {
   )
 }
 
+function ArretLigne({ a, detail, quartierParId, onClick }) {
+  return (
+    <li>
+      <button className="flex w-full items-center gap-3 py-3 text-left" onClick={onClick}>
+        <span className="w-16 shrink-0 text-sm font-semibold text-slate-800">{detail}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm text-slate-800">{a.nom || 'Arrêt ' + a.code}</span>
+          <span className="block text-xs text-slate-500">
+            {quartierParId.get(a.quartier_id) ?? ''}
+            {a.verifie === false && <em className="text-orange-600"> · position à vérifier</em>}
+          </span>
+        </span>
+        <span className="flex flex-wrap justify-end gap-1">
+          {a.codes.map((c) => <Pastille key={c} code={c} />)}
+        </span>
+      </button>
+    </li>
+  )
+}
+
+const formatM = (m) => (m < 1000 ? `${m} m` : `${(m / 1000).toFixed(1)} km`)
+
 export default function App() {
   const [reseau, setReseau] = useState(null)
   const [erreur, setErreur] = useState(null)
   const [visibles, setVisibles] = useState(new Set())
-  const [panneau, setPanneau] = useState(null) // null | 'lignes' | 'depart'
+  const [panneau, setPanneau] = useState(null) // null | 'lignes' | 'depart' | 'destination'
   const [depart, setDepart] = useState(null)
   const [choisir, setChoisir] = useState(false)
   const [cible, setCible] = useState(null)
   const [message, setMessage] = useState(null)
   const [recherche, setRecherche] = useState(false)
+
+  const [destination, setDestination] = useState(null) // quartier choisi
+  const [requete, setRequete] = useState('')
+  const [destArrets, setDestArrets] = useState(null) // résultat de arrets_du_quartier
+  const [destChargement, setDestChargement] = useState(false)
+  const [destErreur, setDestErreur] = useState(null)
+  const numeroRequete = useRef(0)
 
   useEffect(() => {
     chargerReseau()
@@ -40,6 +70,10 @@ export default function App() {
     () => new Map((reseau?.quartiers ?? []).map((q) => [q.id, q.nom])),
     [reseau]
   )
+  const proprietesArret = useMemo(
+    () => new Map((donnees?.arrets.features ?? []).map((f) => [f.properties.id, f.properties])),
+    [donnees]
+  )
 
   const resultat = useMemo(
     () => (depart && donnees ? arretsProches(donnees.arrets, depart.lat, depart.lng) : null),
@@ -52,6 +86,48 @@ export default function App() {
     return distanceM(depart.lat, depart.lng, (y1 + y2) / 2, (x1 + x2) / 2) > 12000
   }, [depart, donnees])
 
+  // Quartiers filtrés par la recherche (sans accents, mots dans n'importe quel ordre)
+  const quartiersFiltres = useMemo(() => {
+    const mots = normaliser(requete).split(/\s+/).filter(Boolean)
+    return [...(reseau?.quartiers ?? [])]
+      .filter((q) => {
+        const t = normaliser(q.nom + ' ' + (q.commune ?? ''))
+        return mots.every((m) => t.includes(m))
+      })
+      .sort((a, b) => a.nom.localeCompare(b.nom, 'fr'))
+  }, [reseau, requete])
+
+  // Lignes qui traversent le quartier de destination
+  const lignesDuQuartier = useMemo(() => {
+    if (!destination || !reseau) return []
+    const idsLignes = new Set(
+      reseau.quartier_lignes.filter((x) => x.quartier_id === destination.id).map((x) => x.ligne_id)
+    )
+    const codes = new Set(reseau.lignes.filter((l) => idsLignes.has(l.id)).map((l) => l.code))
+    return groupes.filter((g) => codes.has(g.code))
+  }, [destination, reseau, groupes])
+
+  const destQuartierFeature = useMemo(
+    () => (destination && donnees ? donnees.quartiers.features.find((f) => f.properties.id === destination.id) : null),
+    [destination, donnees]
+  )
+
+  // Arrêts de la destination, enrichis avec leurs lignes
+  const destListe = useMemo(() => {
+    if (!destArrets) return null
+    const enrichis = destArrets
+      .map((r) => ({ ...(proprietesArret.get(r.id) ?? {}), ...r }))
+      .filter((a) => a.codes)
+    return {
+      dans: enrichis
+        .filter((a) => a.dans_quartier)
+        .sort((a, b) => a.distance_centre_m - b.distance_centre_m),
+      pres: enrichis
+        .filter((a) => !a.dans_quartier)
+        .sort((a, b) => a.distance_bord_m - b.distance_bord_m),
+    }
+  }, [destArrets, proprietesArret])
+
   const placerDepart = (lat, lng, source, precision) => {
     setDepart({ lat, lng, source, precision })
     setChoisir(false)
@@ -62,7 +138,7 @@ export default function App() {
 
   const utiliserGps = () => {
     if (!navigator.geolocation) {
-      setMessage('La géolocalisation n’est pas disponible sur cet appareil. Touchez « Placer le départ » pour choisir sur la carte.')
+      setMessage('La géolocalisation n’est pas disponible sur cet appareil. Utilisez « Départ » pour choisir sur la carte.')
       return
     }
     setRecherche(true)
@@ -83,6 +159,29 @@ export default function App() {
       },
       { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }
     )
+  }
+
+  const choisirDestination = async (q) => {
+    const numero = ++numeroRequete.current
+    setDestination(q)
+    setDestArrets(null)
+    setDestErreur(null)
+    setDestChargement(true)
+    setCible({ bounds: boundsGeometrie(q.geojson) })
+    const { data, error } = await supabase.rpc('arrets_du_quartier', { p_quartier: q.id, p_marge: 400 })
+    if (numero !== numeroRequete.current) return // une autre sélection a eu lieu entre-temps
+    setDestChargement(false)
+    if (error) setDestErreur(error.message)
+    else setDestArrets(data)
+  }
+
+  const effacerDestination = () => {
+    numeroRequete.current++
+    setDestination(null)
+    setDestArrets(null)
+    setDestErreur(null)
+    setDestChargement(false)
+    setRequete('')
   }
 
   const basculer = (code) =>
@@ -108,7 +207,9 @@ export default function App() {
     )
   }
 
-  const bouton = 'rounded-full px-4 py-3 text-sm font-semibold shadow-lg active:scale-95 '
+  const bouton = 'min-w-0 flex-1 whitespace-nowrap rounded-full px-2 py-3 text-xs font-semibold shadow-lg active:scale-95 sm:flex-none sm:px-4 sm:text-sm '
+  const panneauClasse =
+    'absolute bottom-24 left-3 right-3 z-10 overflow-auto rounded-2xl bg-white p-4 shadow-2xl md:bottom-auto md:right-auto md:top-16 md:w-96 md:max-h-[calc(100dvh-9rem)] '
 
   return (
     <div className="relative w-full overflow-hidden bg-slate-100" style={{ height: '100dvh' }}>
@@ -120,6 +221,8 @@ export default function App() {
         choisirDepart={choisir}
         onChoisirPoint={(lat, lng) => placerDepart(lat, lng, 'carte')}
         cible={cible}
+        destQuartier={destQuartierFeature}
+        destArrets={destListe ? [...destListe.dans, ...destListe.pres] : null}
       />
 
       <header className="absolute top-3 left-3 z-10 rounded-full bg-white/95 px-4 py-2 shadow-lg backdrop-blur">
@@ -146,26 +249,157 @@ export default function App() {
         <button
           onClick={utiliserGps}
           disabled={recherche}
-          className={bouton + 'flex-1 bg-sky-600 text-white md:flex-none disabled:opacity-60'}
+          className={bouton + 'bg-sky-600 text-white disabled:opacity-60'}
         >
-          {recherche ? 'Recherche…' : '📍 Ma position'}
+          {recherche ? 'Recherche…' : '📍 Position'}
         </button>
         <button
           onClick={() => { setChoisir((c) => !c); setPanneau(null); setMessage(null) }}
-          className={bouton + 'flex-1 bg-white text-slate-800 md:flex-none'}
+          className={bouton + 'bg-white text-slate-800'}
         >
-          👆 Placer le départ
+          👆 Départ
         </button>
         <button
-          onClick={() => setPanneau((p) => (p === 'lignes' ? null : 'lignes'))}
+          onClick={() => { setChoisir(false); setPanneau((p) => (p === 'destination' ? null : 'destination')) }}
+          className={bouton + 'bg-orange-500 text-white'}
+        >
+          🎯 Destination
+        </button>
+        <button
+          onClick={() => { setChoisir(false); setPanneau((p) => (p === 'lignes' ? null : 'lignes')) }}
           className={bouton + 'bg-slate-900 text-white'}
         >
           Lignes
         </button>
       </div>
 
+      {/* ---------- Panneau DESTINATION ---------- */}
+      {panneau === 'destination' && (
+        <aside className={panneauClasse + 'max-h-[60dvh]'}>
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <h2 className="font-semibold text-slate-800">
+              {destination ? 'Destination' : 'Où allez-vous ?'}
+            </h2>
+            <button className="text-slate-400" aria-label="Fermer" onClick={() => setPanneau(null)}>✕</button>
+          </div>
+
+          {!destination && (
+            <>
+              <input
+                type="search"
+                value={requete}
+                onChange={(e) => setRequete(e.target.value)}
+                placeholder="Rechercher un quartier…"
+                className="mb-2 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-orange-500"
+              />
+              <ul className="divide-y divide-slate-100">
+                {quartiersFiltres.map((q) => (
+                  <li key={q.id}>
+                    <button
+                      className="flex w-full items-center justify-between gap-2 py-2.5 text-left"
+                      onClick={() => choisirDestination(q)}
+                    >
+                      <span className="text-sm text-slate-800">{q.nom}</span>
+                      <span className="shrink-0 text-xs text-slate-400">{q.commune}</span>
+                    </button>
+                  </li>
+                ))}
+                {quartiersFiltres.length === 0 && (
+                  <li className="py-3 text-sm text-slate-500">Aucun quartier ne correspond à « {requete} ».</li>
+                )}
+              </ul>
+            </>
+          )}
+
+          {destination && (
+            <>
+              <div className="mb-3 rounded-xl bg-orange-50 p-3">
+                <p className="font-semibold text-slate-900">{destination.nom}</p>
+                <p className="text-xs text-slate-600">
+                  {destination.commune}
+                  {destination.arrondissement ? ` · ${destination.arrondissement}` : ''}
+                </p>
+                <button className="mt-1 text-xs font-semibold text-orange-700 underline" onClick={effacerDestination}>
+                  Changer de destination
+                </button>
+              </div>
+
+              {destChargement && <p className="text-sm text-slate-500">Recherche des arrêts…</p>}
+              {destErreur && <p className="text-sm text-red-600">Erreur : {destErreur}</p>}
+
+              {destListe && (
+                <>
+                  {destListe.dans.length > 0 && (
+                    <>
+                      <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Arrêts dans le quartier
+                      </h3>
+                      <ul className="divide-y divide-slate-100">
+                        {destListe.dans.map((a) => (
+                          <ArretLigne
+                            key={a.id}
+                            a={a}
+                            quartierParId={quartierParId}
+                            detail={'à ' + formatM(a.distance_centre_m)}
+                            onClick={() => setCible({ lat: a.lat, lng: a.lng, zoom: 17 })}
+                          />
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                  {destListe.pres.length > 0 && (
+                    <>
+                      <h3 className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        À proximité (moins de 400 m du quartier)
+                      </h3>
+                      <ul className="divide-y divide-slate-100">
+                        {destListe.pres.map((a) => (
+                          <ArretLigne
+                            key={a.id}
+                            a={a}
+                            quartierParId={quartierParId}
+                            detail={formatM(a.distance_bord_m)}
+                            onClick={() => setCible({ lat: a.lat, lng: a.lng, zoom: 17 })}
+                          />
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                  {destListe.dans.length === 0 && destListe.pres.length === 0 && (
+                    <p className="rounded-lg bg-amber-50 p-2 text-sm text-amber-900">
+                      Aucun arrêt connu dans ce quartier ni à moins de 400 m.
+                    </p>
+                  )}
+                </>
+              )}
+
+              <h3 className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Lignes qui traversent le quartier
+              </h3>
+              {lignesDuQuartier.length === 0 ? (
+                <p className="text-sm text-slate-500">Aucune ligne du réseau ne traverse ce quartier.</p>
+              ) : (
+                <ul className="mt-1 space-y-1">
+                  {lignesDuQuartier.map((g) => (
+                    <li key={g.code} className="flex items-center gap-2 text-sm text-slate-800">
+                      <Pastille code={g.code} />
+                      <span>{g.noms.join(' / ')}</span>
+                      {!g.a_arrets && <em className="text-xs text-amber-700">tracé seulement, arrêts non relevés</em>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-3 text-xs text-slate-400">
+                Distance des arrêts : en ligne droite, à vol d’oiseau.
+              </p>
+            </>
+          )}
+        </aside>
+      )}
+
+      {/* ---------- Panneau DÉPART ---------- */}
       {panneau === 'depart' && depart && resultat && (
-        <aside className="absolute bottom-24 left-3 right-3 z-10 max-h-[55dvh] overflow-auto rounded-2xl bg-white p-4 shadow-2xl md:bottom-auto md:right-auto md:top-16 md:w-96 md:max-h-[calc(100dvh-9rem)]">
+        <aside className={panneauClasse + 'max-h-[55dvh]'}>
           <div className="mb-1 flex items-start justify-between gap-3">
             <div>
               <h2 className="font-semibold text-slate-800">Arrêts proches de votre départ</h2>
@@ -191,26 +425,13 @@ export default function App() {
 
           <ul className="divide-y divide-slate-100">
             {resultat.arrets.map((a) => (
-              <li key={a.id}>
-                <button
-                  className="flex w-full items-center gap-3 py-3 text-left"
-                  onClick={() => setCible({ lat: a.lat, lng: a.lng, zoom: 17 })}
-                >
-                  <span className="w-16 shrink-0 text-sm font-semibold text-slate-800">
-                    {a.distance < 1000 ? `${a.distance} m` : `${(a.distance / 1000).toFixed(1)} km`}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-sm text-slate-800">{a.nom || 'Arrêt ' + a.code}</span>
-                    <span className="block text-xs text-slate-500">
-                      {quartierParId.get(a.quartier_id) ?? ''}
-                      {a.verifie === false && <em className="text-orange-600"> · position à vérifier</em>}
-                    </span>
-                  </span>
-                  <span className="flex flex-wrap justify-end gap-1">
-                    {a.codes.map((c) => <Pastille key={c} code={c} />)}
-                  </span>
-                </button>
-              </li>
+              <ArretLigne
+                key={a.id}
+                a={a}
+                quartierParId={quartierParId}
+                detail={formatM(a.distance)}
+                onClick={() => setCible({ lat: a.lat, lng: a.lng, zoom: 17 })}
+              />
             ))}
           </ul>
           <p className="mt-2 text-xs text-slate-400">Distances en ligne droite, pas le chemin à pied réel.</p>
@@ -223,8 +444,9 @@ export default function App() {
         </aside>
       )}
 
+      {/* ---------- Panneau LIGNES ---------- */}
       {panneau === 'lignes' && (
-        <aside className="absolute bottom-24 left-3 right-3 z-10 max-h-[60dvh] overflow-auto rounded-2xl bg-white p-4 shadow-2xl md:bottom-auto md:right-auto md:top-16 md:w-80 md:max-h-[calc(100dvh-9rem)]">
+        <aside className={panneauClasse + 'max-h-[60dvh] md:w-80'}>
           <div className="mb-3 flex items-center justify-between">
             <h2 className="font-semibold text-slate-800">Lignes du réseau</h2>
             <div className="flex gap-3 text-xs">
