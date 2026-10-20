@@ -64,6 +64,7 @@ export function construireDonnees(reseau) {
         geometry: { type: 'Point', coordinates: [a.lng, a.lat] },
         properties: {
           id: a.id,
+          quartier_id: a.quartier_id,
           code: a.code,
           nom: a.nom,
           verifie: a.verifie,
