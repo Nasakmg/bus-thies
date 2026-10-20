@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import Accueil from './components/Accueil'
 import CarteReseau from './components/CarteReseau'
 import { supabase } from './lib/supabase'
 import { chargerReseau, construireDonnees, groupesLignes, couleurLigne } from './lib/reseau'
@@ -38,6 +39,12 @@ function ArretLigne({ a, detail, quartierParId, onClick }) {
 const formatM = (m) => (m < 1000 ? `${m} m` : `${(m / 1000).toFixed(1)} km`)
 
 export default function App() {
+  const [ecran, setEcran] = useState('accueil')
+  const [inviteInstallation, setInviteInstallation] = useState(null)
+  const [aideInstallationOuverte, setAideInstallationOuverte] = useState(false)
+  const [installee, setInstallee] = useState(
+    () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true
+  )
   const [reseau, setReseau] = useState(null)
   const [erreur, setErreur] = useState(null)
   const [visibles, setVisibles] = useState(new Set())
@@ -54,6 +61,31 @@ export default function App() {
   const [destChargement, setDestChargement] = useState(false)
   const [destErreur, setDestErreur] = useState(null)
   const numeroRequete = useRef(0)
+
+  useEffect(() => {
+    const proposerInstallation = (event) => {
+      event.preventDefault()
+      setInviteInstallation(event)
+    }
+    const installationTerminee = () => {
+      setInstallee(true)
+      setAideInstallationOuverte(false)
+      localStorage.setItem('bus-thies-install-dismissed', 'true')
+    }
+
+    window.addEventListener('beforeinstallprompt', proposerInstallation)
+    window.addEventListener('appinstalled', installationTerminee)
+    return () => {
+      window.removeEventListener('beforeinstallprompt', proposerInstallation)
+      window.removeEventListener('appinstalled', installationTerminee)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (installee || localStorage.getItem('bus-thies-install-dismissed')) return
+    const timer = window.setTimeout(() => setAideInstallationOuverte(true), 1100)
+    return () => window.clearTimeout(timer)
+  }, [installee])
 
   useEffect(() => {
     chargerReseau()
@@ -184,6 +216,29 @@ export default function App() {
     setRequete('')
   }
 
+  const guiderInstallation = async () => {
+    if (!inviteInstallation) {
+      setAideInstallationOuverte(true)
+      return
+    }
+
+    await inviteInstallation.prompt()
+    const { outcome } = await inviteInstallation.userChoice
+    setInviteInstallation(null)
+    if (outcome === 'accepted') {
+      localStorage.setItem('bus-thies-install-dismissed', 'true')
+      setAideInstallationOuverte(false)
+    }
+  }
+
+  const plusTardInstallation = () => {
+    localStorage.setItem('bus-thies-install-dismissed', 'true')
+    setAideInstallationOuverte(false)
+  }
+
+  const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+
   const basculer = (code) =>
     setVisibles((prev) => {
       const suivant = new Set(prev)
@@ -192,17 +247,85 @@ export default function App() {
       return suivant
     })
 
+  if (ecran === 'accueil') {
+    return (
+      <>
+        <Accueil
+          nombreArrets={reseau?.arrets.length ?? 0}
+          nombreLignes={groupes.length}
+          nombreQuartiers={reseau?.quartiers.length ?? 0}
+          donneesDisponibles={Boolean(reseau)}
+          installee={installee}
+          installer={guiderInstallation}
+          aideInstallation={() => setAideInstallationOuverte(true)}
+          ouvrirCarte={() => setEcran('carte')}
+        />
+        {aideInstallationOuverte && !installee && (
+          <div className="install-overlay" role="presentation" onClick={plusTardInstallation}>
+            <section
+              className="install-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="install-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <button className="install-close" onClick={plusTardInstallation} aria-label="Fermer">×</button>
+              <span className="install-app-icon"><img src="/bus-tata.svg" alt="" /></span>
+              <p className="install-kicker">VOTRE COMPAGNON DE ROUTE</p>
+              <h2 id="install-title">Bus Tata Thiès, toujours à portée de main.</h2>
+              <p className="install-description">
+                Ajoutez l’application à votre écran d’accueil pour retrouver le réseau en un seul toucher.
+              </p>
+              {ios ? (
+                <ol className="install-steps">
+                  <li><span>1</span> Touchez <strong>Partager</strong> dans Safari.</li>
+                  <li><span>2</span> Choisissez <strong>Sur l’écran d’accueil</strong>.</li>
+                  <li><span>3</span> Touchez <strong>Ajouter</strong>.</li>
+                </ol>
+              ) : (
+                <p className="install-description install-tip">
+                  {inviteInstallation
+                    ? 'L’installation ajoute une icône comme une vraie application, sans passer par l’App Store.'
+                    : 'Dans le menu de votre navigateur, choisissez « Installer l’application » ou « Ajouter à l’écran d’accueil ».'
+                  }
+                </p>
+              )}
+              <button
+                className="install-confirm"
+                onClick={ios || !inviteInstallation ? plusTardInstallation : guiderInstallation}
+              >
+                {ios || !inviteInstallation ? 'J’ai compris' : 'Installer Bus Tata Thiès'}
+              </button>
+              <button className="install-later" onClick={plusTardInstallation}>Continuer sur le site</button>
+            </section>
+          </div>
+        )}
+      </>
+    )
+  }
+
   if (erreur) {
     return (
       <main className="grid place-items-center p-6 text-center" style={{ height: '100dvh' }}>
-        <p className="text-red-600">Erreur : {erreur}</p>
+        <div>
+          <p className="text-red-600">Erreur : {erreur}</p>
+          <button className="mt-4 rounded-full bg-slate-900 px-5 py-3 text-white" onClick={() => setEcran('accueil')}>
+            Retour à l’accueil
+          </button>
+        </div>
       </main>
     )
   }
   if (!reseau || !donnees) {
     return (
       <main className="grid place-items-center text-slate-500" style={{ height: '100dvh' }}>
-        Chargement du réseau…
+        <div className="text-center">
+          <span className="loading-bus"><span>🚌</span></span>
+          <p className="mt-4">Préparation de votre itinéraire…</p>
+          <button className="mt-5 text-sm font-semibold text-sky-700 underline" onClick={() => setEcran('accueil')}>
+            Retour à l’accueil
+          </button>
+        </div>
       </main>
     )
   }
@@ -225,8 +348,16 @@ export default function App() {
         destArrets={destListe ? [...destListe.dans, ...destListe.pres] : null}
       />
 
-      <header className="absolute top-3 left-3 z-10 rounded-full bg-white/95 px-4 py-2 shadow-lg backdrop-blur">
-        <h1 className="text-sm font-bold text-slate-800">🚌 Bus Tata Thiès</h1>
+      <header className="absolute top-3 left-3 z-10 flex items-center gap-2 rounded-full bg-white/95 py-1.5 pl-1.5 pr-4 shadow-lg backdrop-blur">
+        <button
+          className="map-home-button"
+          onClick={() => setEcran('accueil')}
+          aria-label="Retour à l’accueil"
+          title="Accueil"
+        >
+          🚌
+        </button>
+        <h1 className="text-sm font-bold text-slate-800">Bus Tata Thiès</h1>
       </header>
 
       {choisir && (

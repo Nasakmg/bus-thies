@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "Bus Tata Thiès",
+  "short_name": "Bus Tata",
+  "description": "Lignes, arrêts et quartiers du réseau de bus Tata à Thiès, Sénégal.",
+  "lang": "fr-SN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8f8f2",
+  "theme_color": "#18363b",
+  "categories": ["travel", "navigation"],
+  "icons": [
+    {
+      "src": "/bus-tata-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/bus-tata-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/bus-tata.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
